@@ -1,12 +1,341 @@
-[build]
-  command = "npm run build"
-  publish = ".next"
+txt
+aiogram==3.0.0
+python-dotenv==1.0.0
+aiohttp==3.9.1
+openai==1.12.0  # Optional: for OpenAI integration
+python
+import os
+from dotenv import load_dotenv
 
-[functions]
-  directory = "netlify/functions"
+load_dotenv()
 
-[[plugins]]
-  package = "@netlify/plugin-nextjs"
+class Config:
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    
+    # Choose which method to use for answering questions
+    # Options: "openai", "mock", "web_search"
+    ANSWER_METHOD = os.getenv("ANSWER_METHOD", "mock")
+    
+    # OpenAI Configuration (if using)
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+    
+    # Web search configuration (if using)
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
+    
+    # Mock responses
+    MOCK_RESPONSES = [
+        "Based on my analysis: {question} is an interesting topic that requires more research.",
+        "The answer to '{question}' depends on various factors. I recommend consulting reliable sources.",
+        "I understand you're asking about {question}. This is a complex subject that experts are still studying.",
+        "Regarding {question}: My current knowledge suggests that further investigation would be beneficial."
+    ]
 
-[template]
-  required-extensions = ["prisma-postgres"]
+config = Config()
+python
+import random
+import aiohttp
+from typing import Optional
+from config import config
+
+async def get_openai_answer(question: str) -> str:
+    """Get answer using OpenAI API"""
+    try:
+        from openai import AsyncOpenAI
+        
+        client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+        
+        response = await client.chat.completions.create(
+            model=config.OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that provides accurate and concise answers."},
+                {"role": "user", "content": question}
+            ],
+            max_tokens=500,
+            temperature=0.7
+        )
+        
+        return response.choices[0].message.content.strip()
+    except ImportError:
+        return "OpenAI package not installed. Please install with: pip install openai"
+    except Exception as e:
+        return f"Error getting answer from OpenAI: {str(e)}"
+
+async def get_web_search_answer(question: str) -> str:
+    """Get answer using web search (Google Custom Search)"""
+    try:
+        if not config.GOOGLE_API_KEY or not config.GOOGLE_CSE_ID:
+            return "Web search is not configured. Please provide GOOGLE_API_KEY and GOOGLE_CSE_ID."
+        
+        async with aiohttp.ClientSession() as session:
+            params = {
+                'key': config.GOOGLE_API_KEY,
+                'cx': config.GOOGLE_CSE_ID,
+                'q': question,
+                'num': 3
+            }
+            
+            async with session.get('https://www.googleapis.com/customsearch/v1', params=params) as response:
+                data = await response.json()
+                
+                if 'items' in data:
+                    snippets = [item.get('snippet', '') for item in data['items'][:3]]
+                    summary = "\n\n".join(snippets)
+                    return f"Based on web search results:\n\n{summary[:1000]}..." if len(summary) > 1000 else f"Based on web search results:\n\n{summary}"
+                else:
+                    return "No relevant search results found."
+    except Exception as e:
+        return f"Error during web search: {str(e)}"
+
+def get_mock_answer(question: str) -> str:
+    """Get a mock answer for testing"""
+    template = random.choice(config.MOCK_RESPONSES)
+    return template.format(question=question)
+
+async def get_answer(question: str, method: Optional[str] = None) -> str:
+    """Main function to get answer based on configured method"""
+    if method is None:
+        method = config.ANSWER_METHOD
+    
+    if method == "openai":
+        return await get_openai_answer(question)
+    elif method == "web_search":
+        return await get_web_search_answer(question)
+    elif method == "mock":
+        return get_mock_answer(question)
+    else:
+        return "Invalid answer method configured. Please check your settings."
+python
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from utils import get_answer
+from config import config
+
+router = Router()
+
+# State for question answering
+class QuestionStates(StatesGroup):
+    waiting_for_question = State()
+
+# Start command
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    welcome_text = """
+🤖 *Question Answering Bot*
+
+I can help answer your questions! Here's how to use me:
+
+📝 *Send me any question* - Just type your question and I'll do my best to answer it
+
+🔧 *Commands:*
+/start - Show this message
+/help - Get help
+/answer_mode - Change answer method
+/about - About this bot
+
+*Example questions:*
+• What is the capital of France?
+• How does photosynthesis work?
+• What are the benefits of exercise?
+"""
+    await message.answer(welcome_text, parse_mode="Markdown")
+
+# Help command
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    help_text = """
+📚 *Help Guide*
+
+1. Simply send me any question in text format
+2. I'll process it and provide an answer based on the configured method
+
+*Current answer method:* `{method}`
+
+*Available methods:*
+• `mock` - Predefined responses (for testing)
+• `openai` - Uses OpenAI GPT models (requires API key)
+• `web_search` - Searches the web (requires Google API keys)
+
+*To change method:* Use /answer_mode or contact the bot administrator
+""".format(method=config.ANSWER_METHOD)
+    await message.answer(help_text, parse_mode="Markdown")
+
+# Answer mode selection
+@router.message(Command("answer_mode"))
+async def cmd_answer_mode(message: Message):
+    if message.from_user.id not in [ADMIN_ID]:  # Replace with your admin ID
+        await message.answer("This command is for administrators only.")
+        return
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🤖 OpenAI", callback_data="mode_openai")
+    builder.button(text="🌐 Web Search", callback_data="mode_web_search")
+    builder.button(text="⚡ Mock", callback_data="mode_mock")
+    builder.adjust(1)
+    
+    await message.answer(
+        "Select answer method (admin only):",
+        reply_markup=builder.as_markup()
+    )
+
+@router.callback_query(F.data.startswith("mode_"))
+async def process_mode_selection(callback: CallbackQuery):
+    mode = callback.data.split("_")[1]
+    
+    # In a real implementation, you would save this preference
+    # to a database or configuration file
+    await callback.message.edit_text(
+        f"Answer method changed to: {mode}\n\n"
+        f"*Note:* This is a demo. In a real bot, this would update the configuration.",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+# About command
+@router.message(Command("about"))
+async def cmd_about(message: Message):
+    about_text = """
+🧠 *About This Bot*
+
+*Version:* 1.0.0
+*Framework:* aiogram 3.x
+*Purpose:* Question answering bot
+
+*Features:*
+• Multiple answer methods
+• Easy to extend
+• Asynchronous processing
+• Customizable responses
+
+*Developer:* Your Name Here
+*Source:* [GitHub Repository](https://github.com/yourusername/question-bot)
+"""
+    await message.answer(about_text, parse_mode="Markdown")
+
+# Handle any text message as a question
+@router.message(F.text)
+async def handle_question(message: Message):
+    question = message.text.strip()
+    
+    # Ignore commands
+    if question.startswith('/'):
+        return
+    
+    # Send "typing" action
+    await message.bot.send_chat_action(message.chat.id, "typing")
+    
+    # Get answer based on configured method
+    answer = await get_answer(question)
+    
+    # Format the response
+    response = f"❓ *Question:*\n{question}\n\n"
+    response += f"💡 *Answer:*\n{answer}\n\n"
+    response += f"🔧 *Method used:* {config.ANSWER_METHOD}"
+    
+    await message.answer(response, parse_mode="Markdown")
+
+# Handle other types of messages
+@router.message()
+async def handle_other_messages(message: Message):
+    await message.answer(
+        "I can only process text questions. "
+        "Please send your question as text, or use /help for instructions."
+    )
+
+python
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
+
+from config import config
+from handlers import router
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+async def main():
+    # Check if bot token is provided
+    if not config.BOT_TOKEN:
+        logger.error("No BOT_TOKEN provided. Please set it in .env file")
+        return
+    
+    # Initialize bot and dispatcher
+    bot = Bot(token=config.BOT_TOKEN)
+    storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
+    
+    # Include router
+    dp.include_router(router)
+    
+    # Set bot commands
+    await bot.set_my_commands([
+        {"command": "start", "description": "Start the bot"},
+        {"command": "help", "description": "Get help"},
+        {"command": "about", "description": "About this bot"},
+    ])
+    
+    # Start polling
+    logger.info("Starting bot...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+Create a .env file in your project root:
+
+env
+# Required
+BOT_TOKEN=your_telegram_bot_token_here
+
+# Answer method: "openai", "web_search", or "mock"
+ANSWER_METHOD=mock
+
+# OpenAI Configuration (if using)
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_MODEL=gpt-3.5-turbo
+
+# Google Custom Search (if using)
+GOOGLE_API_KEY=your_google_api_key_here
+GOOGLE_CSE_ID=your_custom_search_engine_id_here
+python
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message
+from aiogram.filters import Command
+import asyncio
+import random
+
+BOT_TOKEN = "YOUR_BOT_TOKEN"
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+@dp.message(Command("start"))
+async def start(message: Message):
+    await message.answer("Hi! Send me any question and I'll try to answer it.")
+
+@dp.message(F.text)
+async def answer_question(message: Message):
+    question = message.text
+    answers = [
+        f"Interesting question: {question}\nMy analysis suggests...",
+        f"Regarding {question}, I believe...",
+        f"The answer to '{question}' depends on...",
+    ]
+    await message.answer(random.choice(answers))
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+  
